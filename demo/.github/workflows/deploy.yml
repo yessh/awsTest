@@ -1,24 +1,59 @@
-# Workflow의 이름
-# Workflow : 하나의 yml 파일을 하나의 Workflow라고 부른다.
-name: Github Actions 실행시켜보기
+name: Deploy To EC2
 
-# Event : 실행되는 시점을 설정
-# main이라는 브랜치에 push 될 때 아래 Workflow를 실행
 on:
   push:
     branches:
       - main
 
-# 하나의 Workflow는 1개 이상의 Job으로 구성된다.
-# 여러 Job은 기본적으로 병렬적으로 수행된다.
 jobs:
-  # Job을 식별하기 위한 id
-  My-Deploy-Job:
-    # Github Actions를 실행시킬 서버 종류 선택
+  deploy:
     runs-on: ubuntu-latest
-
-    # Step : 특정 작업을 수행하는 가장 작은 단위
-    # Job은 여러 Step들로 구성되어 있다.
     steps:
-      - name: Hello World 찍기 # Step에 이름 붙이는 기능
-        run: echo "Hello World" # 실행시킬 명령어 작성
+      - name: Github Repository 파일 불러오기
+        uses: actions/checkout@v4
+
+      - name: JDK 17버전 설치
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: application.yml 파일 만들기
+        run: echo "${{ secrets.APPLICATION_PROPERTIES }}" > ./src/main/resources/application.yml
+
+      - name: 테스트 및 빌드하기
+        run: ./gradlew clean build
+
+      - name: AWS Resource에 접근할 수 있게 AWS credentials 설정
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-2
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: ECR에 로그인하기
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Docker 이미지 생성
+        run: docker build -t instagram-server .
+
+      - name: Docker 이미지에 Tag 붙이기
+        run: docker tag instagram-server ${{ steps.login-ecr.outputs.registry }}/awstest-server:latest
+
+      - name: ECR에 Docker 이미지 Push
+        run: docker push ${{ steps.login-ecr.outputs.registry }}/awstest-server:latest
+
+      - name: SSR로 EC2에 접속하기
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            docker stop awstest-server || true
+            docker rm awstest-server || true
+            docker pull ${{ steps.login-ecr.output.registry }}/awstest-server:latest
+            docker run -d --name awstest-server -p 8080:8080 ${{ steps.login-ecr.outputs.registry }}/awstest-server:latest
+            
